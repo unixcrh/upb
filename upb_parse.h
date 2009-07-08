@@ -100,12 +100,17 @@ typedef void (*upb_submsg_start_cb)(struct upb_parse_state *s,
                                     void *user_field_desc);
 typedef void (*upb_submsg_end_cb)(struct upb_parse_state *s);
 
+#ifndef __cplusplus
+/* C++ doesn't support flexible array members.  Will need to work out a better
+ * solution to this problem, but for the moment C++ can't access this struct.*/
+
 /* Each stack frame (one for each level of submessages/groups) has this format,
  * where user_data has as many bytes allocated as specified when initialized. */
 struct upb_parse_stack_frame {
   size_t end_offset; /* 0 indicates that this is a group. */
   char user_data[];
 };
+#endif
 
 struct upb_parse_state {
   size_t offset;

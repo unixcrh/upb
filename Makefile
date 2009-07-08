@@ -13,7 +13,8 @@ libupb.a: $(OBJ)
 	ar rcs libupb.a $(OBJ)
 test_table: libupb.a
 upbc: libupb.a
-benchmark: libupb.a -lm
+benchmark: libupb.a -lm google_speed.pb.o benchmark.o
+	g++ $(CPPFLAGS) benchmark.cc libupb.a google_speed.pb.o   -o benchmark -lm -lprotobuf -lpthread
 
 -include deps
 deps: *.c *.h

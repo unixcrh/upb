@@ -259,7 +259,7 @@ void upb_parse_reset(struct upb_parse_state *state)
   state->top = state->stack;
   /* The top-level message is not delimited (we can keep receiving data for
    * it indefinitely). */
-  state->top->end_offset = SIZE_MAX;
+  state->top->end_offset = INT64_MAX;
 }
 
 void upb_parse_init(struct upb_parse_state *state, size_t udata_size)
@@ -277,28 +277,34 @@ void upb_parse_free(struct upb_parse_state *state)
   free(state->stack);
 }
 
-static void pop_stack_frame(struct upb_parse_state *s)
+static void pop_stack_frame(struct upb_parse_state *s, size_t offset, size_t *remaining)
 {
   if(s->submsg_end_cb) s->submsg_end_cb(s);
   s->top--;
   s->top = (struct upb_parse_stack_frame*)((char*)s->top - s->udata_size);
+  *remaining = s->top->end_offset - offset;
 }
 
-static upb_status_t push_stack_frame(struct upb_parse_state *s, size_t end,
-                                     void *user_field_desc)
+static upb_status_t push_stack_frame(struct upb_parse_state *s,
+                                     size_t base, size_t len, size_t offset,
+                                     void *user_field_desc,
+                                     size_t *remaining)
 {
   s->top++;
   s->top = (struct upb_parse_stack_frame*)((char*)s->top + s->udata_size);
   if(s->top > s->limit) return UPB_ERROR_STACK_OVERFLOW;
-  s->top->end_offset = end;
+  s->top->end_offset = base + len;
   if(s->submsg_start_cb) s->submsg_start_cb(s, user_field_desc);
+  *remaining = s->top->end_offset - offset;
   return UPB_STATUS_OK;
 }
 
 static upb_status_t parse_delimited(struct upb_parse_state *s,
                                     struct upb_tag *tag,
                                     void **buf, void *end,
-                                    size_t base_offset)
+                                    size_t base_offset,
+                                    size_t offset,
+                                    size_t *remaining)
 {
   int32_t delim_len;
   void *user_field_desc;
@@ -317,8 +323,8 @@ static upb_status_t parse_delimited(struct upb_parse_state *s,
   }
 
   if(ft == GOOGLE_PROTOBUF_FIELDDESCRIPTORPROTO_TYPE_MESSAGE) {
-    base_offset += ((char*)*buf - (char*)bufstart);
-    UPB_CHECK(push_stack_frame(s, base_offset + delim_len, user_field_desc));
+    base_offset +=  ((char*)*buf - (char*)bufstart);
+    UPB_CHECK(push_stack_frame(s, base_offset, delim_len, offset, user_field_desc, remaining));
   } else {
     void *delim_end = (char*)*buf + delim_len;
     if(ft == GOOGLE_PROTOBUF_FIELDDESCRIPTORPROTO_TYPE_STRING ||
@@ -337,7 +343,7 @@ static upb_status_t parse_delimited(struct upb_parse_state *s,
 
 static upb_status_t parse_nondelimited(struct upb_parse_state *s,
                                        struct upb_tag *tag,
-                                       void **buf, void *end)
+                                       void **buf, void *end, size_t *remaining)
 {
   /* Simple value or begin group. */
   void *user_field_desc;
@@ -346,7 +352,7 @@ static upb_status_t parse_nondelimited(struct upb_parse_state *s,
     UPB_CHECK(skip_wire_value(buf, end, tag->wire_type));
   } else if(ft == GOOGLE_PROTOBUF_FIELDDESCRIPTORPROTO_TYPE_GROUP) {
     /* No length specified, an "end group" tag will mark the end. */
-    UPB_CHECK(push_stack_frame(s, UINT32_MAX, user_field_desc));
+    UPB_CHECK(push_stack_frame(s, 0, INT32_MAX, 0, user_field_desc, remaining));
   } else {
     UPB_CHECK(s->value_cb(s, buf, end, user_field_desc));
   }
@@ -357,28 +363,30 @@ upb_status_t upb_parse(struct upb_parse_state *restrict s, void *buf, size_t len
                        size_t *restrict read)
 {
   void *end = (char*)buf + len;
-  *read = 0;
+  size_t offset = s->offset;
+  long remaining = s->top->end_offset - offset;
   while(buf < end) {
-    while(s->offset >= s->top->end_offset) {
-      if(s->offset != s->top->end_offset) return UPB_ERROR_BAD_SUBMESSAGE_END;
-      pop_stack_frame(s);
-    }
-
     struct upb_tag tag;
     void *bufstart = buf;
     UPB_CHECK(parse_tag(&buf, end, &tag));
     if(tag.wire_type == UPB_WIRE_TYPE_END_GROUP) {
-      if(s->top->end_offset != UINT32_MAX)
-        return UPB_ERROR_SPURIOUS_END_GROUP;
-      pop_stack_frame(s);
+      //if(s->top->end_offset != UINT32_MAX)
+      //  return UPB_ERROR_SPURIOUS_END_GROUP;
+      pop_stack_frame(s, offset, &remaining);
     } else if(tag.wire_type == UPB_WIRE_TYPE_DELIMITED) {
-      parse_delimited(s, &tag, &buf, end, s->offset + (char*)buf - (char*)bufstart);
+      parse_delimited(s, &tag, &buf, end, offset + (char*)buf - (char*)bufstart, offset, &remaining);
     } else {
-      parse_nondelimited(s, &tag, &buf, end);
+      parse_nondelimited(s, &tag, &buf, end, &remaining);
     }
     size_t bytes_read = ((char*)buf - (char*)bufstart);
-    *read += bytes_read;
-    s->offset += bytes_read;
+    offset += bytes_read;
+    remaining -= bytes_read;
+    while(remaining <= 0) {
+      if(remaining != 0) return UPB_ERROR_BAD_SUBMESSAGE_END;
+      pop_stack_frame(s, offset, &remaining);
+    }
   }
+  *read = offset - s->offset;
+  s->offset = offset;
   return UPB_STATUS_OK;
 }
